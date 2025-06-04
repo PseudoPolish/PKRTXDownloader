@@ -9,6 +9,7 @@ import zipfile
 import py7zr               # to extract .7z files
 import threading
 import certifi
+import time
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 
@@ -66,17 +67,30 @@ class PKRTXDownloader:
         self.scraper = cloudscraper.create_scraper()  # to bypass Cloudflare
         self.cancel_event = threading.Event()
         self.download_thread = None
+        self.current_start_time = None  # for ETA calculation
 
         # Chapter selection frame
         frame_ch = tk.LabelFrame(root, text="Select Chapters to Install", padx=10, pady=10)
         frame_ch.pack(fill="x", padx=20, pady=(20, 10))
 
+        # Notice: we map a simple key "Base" → var, but display a longer label
         self.part_vars = {}
-        for part in ["Base", "Chapter 1", "Chapter 2", "Chapter 3", "Chapter 4", "Chapter 5", "Chapter 6"]:
+
+        items = [
+            ("Base",      "Base (Mandatory)     (8.79GB)"),
+            ("Chapter 1", "Chapter 1                   (3.85GB)"),
+            ("Chapter 2", "Chapter 2                   (7.92GB)"),
+            ("Chapter 3", "Chapter 3                   (2.01GB)"),
+            ("Chapter 4", "Chapter 4                   (4.99GB)"),
+            ("Chapter 5", "Chapter 5                   (2.12GB)"),
+            ("Chapter 6", "Chapter 6                   (4.99GB)"),
+        ]
+
+        for key, label_text in items:
             var = tk.IntVar()
-            chk = tk.Checkbutton(frame_ch, text=part, variable=var, command=self.toggle_resolution)
+            chk = tk.Checkbutton(frame_ch, text=label_text, variable=var, command=self.toggle_resolution)
             chk.pack(anchor="w")
-            self.part_vars[part] = var
+            self.part_vars[key] = var
 
         # HUD resolution frame (only for Base)
         frame_res = tk.LabelFrame(root, text="Select HUD Resolution (Base only)", padx=10, pady=10)
@@ -99,7 +113,7 @@ class PKRTXDownloader:
         # Download and Cancel buttons
         btn_frame = tk.Frame(root)
         btn_frame.pack(pady=(0, 10))
-        self.download_btn = tk.Button(btn_frame, text="Download & Install", command=self.start_download)
+        self.download_btn = tk.Button(btn_frame, text="Download & Install", command=self.confirm_and_start)
         self.download_btn.pack(side="left", padx=(0, 10))
         self.cancel_btn = tk.Button(btn_frame, text="Cancel", command=self.cancel_download, state="disabled")
         self.cancel_btn.pack(side="left")
@@ -133,6 +147,41 @@ class PKRTXDownloader:
         if folder:
             self.install_dir = folder
             self.install_label.config(text=folder)
+
+    def confirm_and_start(self):
+        # Gather selected chapters
+        selected = [p for p, v in self.part_vars.items() if v.get() == 1]
+        if not selected:
+            messagebox.showerror("Error", "Select at least one part (Base or Chapter).")
+            return
+
+        # If Base selected, ensure resolution
+        if "Base" in selected:
+            resolution = self.res_var.get()
+            if not resolution:
+                messagebox.showerror("Error", "Select a HUD resolution for Base.")
+                return
+        else:
+            resolution = None
+
+        # Build confirmation message
+        chapters_str = ", ".join(selected)
+        all_chapters = ["Base"] + [f"Chapter {i}" for i in range(1, 7)]
+        missing = [c for c in all_chapters if c not in selected]
+        missing_str = ", ".join(missing)
+
+        confirm_msg = (
+            f"You have selected: {chapters_str}\n"
+            f"HUD resolution: {resolution or 'N/A'}\n\n"
+            f"Chapters not selected (won't be installed/playable): {missing_str}\n"
+            "You can run this downloader again later to get missing chapters. Continue?"
+        )
+
+        if not messagebox.askyesno("Confirm Download & Install", confirm_msg):
+            return  # User cancelled
+
+        # All good, start the download process
+        self.start_download()
 
     def start_download(self):
         # Disable download button, enable cancel
@@ -284,10 +333,11 @@ class PKRTXDownloader:
         real_url = self._resolve_moddb_url(start_url)
 
         filename = os.path.basename(urlparse(real_url).path)
-        self._update_status(f"Downloading {label}: 0%", 0)
+        self.current_start_time = time.time()
+        self._update_status(f"Downloading {label}: 0.00/0.00 GB ETA: 00:00:00", 0)
 
         temp_archive = os.path.join(temp_dir, f"{label}.archive")
-        self._download_file(real_url, temp_archive, label)
+        self._download_file(label, real_url, temp_archive)
 
         extract_to = os.path.join(temp_dir, f"{label}_extracted")
         os.makedirs(extract_to, exist_ok=True)
@@ -319,29 +369,17 @@ class PKRTXDownloader:
             for fname in os.listdir(hud_path):
                 shutil.copy2(os.path.join(hud_path, fname), os.path.join(dest_bin, fname))
         else:
-            # Find and merge any "Bin" subfolder under root_folder
             bin_src = self._find_subdir(root_folder, "Bin")
             if bin_src:
                 self._merge_custom(bin_src, os.path.join(self.install_dir, "Bin"))
-            # Find and merge any "Data" subfolder if it exists
             data_src = self._find_subdir(root_folder, "Data")
             if data_src:
                 self._merge_custom(data_src, os.path.join(self.install_dir, "Data"))
 
-    def _find_subdir(self, root: str, subname: str) -> str:
+    def _download_file(self, label: str, url: str, output_path: str):
         """
-        Recursively search for the first directory named `subname` under `root`.
-        Return its full path, or None if not found.
-        """
-        for dirpath, dirnames, _ in os.walk(root):
-            if os.path.basename(dirpath).lower() == subname.lower():
-                return dirpath
-        return None
-
-    def _download_file(self, url: str, output_path: str, label: str):
-        """
-        Download a file from `url` to `output_path`, streaming in chunks.
-        Raises Exception if HTTP status != 200 or if size mismatches.
+        Download a file from `url` to `output_path`, streaming in chunks
+        and updating size/ETA in GB.
         """
         CHUNK_SIZE = 1024 * 1024
         r = self.scraper.get(url, headers=COMMON_HEADERS, stream=True)
@@ -358,12 +396,42 @@ class PKRTXDownloader:
                 if chunk:
                     f.write(chunk)
                     downloaded += len(chunk)
-                    if total_size:
-                        percent = int((downloaded / total_size) * 100)
-                        self._update_status(f"Downloading {label}: {percent}%", percent)
+
+                    # Calculate percentage
+                    percent = int((downloaded / total_size) * 100) if total_size else 0
+
+                    # Convert to GB
+                    downloaded_gb = downloaded / (1024 ** 3)
+                    total_gb = total_size / (1024 ** 3)
+
+                    # Estimate remaining time
+                    elapsed = time.time() - self.current_start_time
+                    if elapsed > 0 and downloaded > 0:
+                        rate = downloaded / elapsed  # bytes/sec
+                        remaining = total_size - downloaded
+                        eta_seconds = int(remaining / rate) if rate > 0 else 0
+                    else:
+                        eta_seconds = 0
+                    eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_seconds))
+
+                    status_text = (
+                        f"Downloading {label}: "
+                        f"{downloaded_gb:.2f}/{total_gb:.2f} GB  ETA: {eta_str}"
+                    )
+                    self._update_status(status_text, percent)
 
         if total_size and downloaded != total_size:
-            raise Exception(f"Size mismatch for {label} ({downloaded}/{total_size} bytes)." )
+            raise Exception(f"Size mismatch for {label} ({downloaded}/{total_size} bytes).")
+
+    def _find_subdir(self, root: str, subname: str) -> str:
+        """
+        Recursively search for the first directory named `subname` under `root`.
+        Return its full path, or None if not found.
+        """
+        for dirpath, dirnames, _ in os.walk(root):
+            if os.path.basename(dirpath).lower() == subname.lower():
+                return dirpath
+        return None
 
     def _merge(self, root_folder: str, subfolder: str):
         """
