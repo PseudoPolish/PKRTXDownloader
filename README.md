@@ -2,7 +2,7 @@
 PKRTXDownloader is an application that automatically downloads and installs [Painkiller RTX Remix](https://www.moddb.com/mods/painkiller-rtx-remix) mod from ModDB.
 It does not require any prerequisites to run.
 
-1. Go to the [Releases](https://github.com/PseudoPolish/PKRTXDownloader/releases) and download the release archive
+1. Go to the [Releases](https://github.com/PseudoPolish/PKRTXDownloader/releases) and download PKRTXDownloader.dist.7z
 2. Unzip it
 3. Launch PKRTXDownloader.exe
 4. Pick the chapters you want, HUD resolution and your Painkiller installation folder
